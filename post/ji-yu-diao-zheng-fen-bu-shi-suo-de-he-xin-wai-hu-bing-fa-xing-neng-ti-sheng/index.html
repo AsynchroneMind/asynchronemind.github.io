@@ -1,0 +1,221 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>基于调整分布式锁的核心外呼并发性能提升 | Asynn</title>
+<link rel="shortcut icon" href="https://asynchronemind.github.io/favicon.ico?v=1722239062648">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://asynchronemind.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="基于调整分布式锁的核心外呼并发性能提升 | Asynn - Atom Feed" href="https://asynchronemind.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="问题描述
+在前几天工作日处理完需求后看了看整个系统的核心功能：发起外呼的源码实现。
+具体实现流程：
+
+在FreeSwitchClientUtil中存在：
+public static void callOut(String bussType,..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://asynchronemind.github.io">
+  <img class="avatar" src="https://asynchronemind.github.io/images/avatar.png?v=1722239062648" alt="">
+  </a>
+  <h1 class="site-title">
+    Asynn
+  </h1>
+  <p class="site-description">
+    习惯无常才会庆幸。
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              基于调整分布式锁的核心外呼并发性能提升
+            </h2>
+            <div class="post-info">
+              <span>
+                2024-07-20
+              </span>
+              <span>
+                2 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h2 id="问题描述">问题描述</h2>
+<p>在前几天工作日处理完需求后看了看整个系统的核心功能：<strong>发起外呼</strong>的源码实现。<br>
+具体实现流程：<br>
+<img src="https://asynchronemind.github.io/post-images/1721473754429.png" alt="" loading="lazy"><br>
+在<code>FreeSwitchClientUtil</code>中存在：</p>
+<pre><code class="language-java">public static void callOut(String bussType, String command, String api){ // 调用的主方法
+    getInstace(getClusterId(bussType)).callOut(command, api);
+}
+
+private static FreeswitchClient getInstace(String clusterId) {
+    FreeswitchClient instance = null;
+    if (clusterMap.get(clusterId) == null){
+        synchronized (FreeswitchClientUtil.class){
+            FreeswitchNginxInfo info = staticFreeswitchInfoService.getNginxInfo(clusterId).getObj();
+            if (info == null){
+                throw new RuntimeException(&quot;未获取到集群信息,clusterId : &quot; + clusterId);
+            }
+            if (clusterMap.get(clusterId) == null){
+                instance = new FreeswitchClient(clusterId, info.getAddr(), info.getAuthorization());
+                clusterMap.put(clusterId, instance);
+            }
+        }
+    } else {
+        instance = clusterMap.get(clusterId);
+    }
+    // ...
+}
+
+/**
+    * 根据业务类型分流策略选择集群ID
+    * */
+private static String getClusterId(String bussType) {
+    String clusterId = &quot;&quot;;
+    List&lt;FreeswitchRouteConf&gt; list = null;
+    if (bussTypeRouteMap.get(bussType) == null){
+        synchronized (FreeswitchClientUtil.class){
+            list = staticFreeswitchInfoService.getRouteConf(bussType).getObj();
+            bussTypeRouteMap.put(bussType, list);
+        }
+    } else {
+        list = bussTypeRouteMap.get(bussType);
+    }
+    if (CollectionUtils.isEmpty(list)){
+        throw new RuntimeException();
+    }
+    // ...
+}
+</code></pre>
+<p>其中<code>clusterMap</code>、<code>bussTypeRouteMap</code>都是<code>ConcurrentHashMap</code>。<br>
+于是我便发现问题：</p>
+<ol>
+<li><code>synchronized (FreeswitchClientUtil.class)</code>锁粒度太粗。</li>
+<li><code>synchronized</code>和线程安全的<code>ConcurrentHashMap</code>重叠套用，并且<code>ConcurrentHashMap</code>中没有<strong>非原子</strong>操作，可以完全保障并发安全性。</li>
+<li><strong>核心在于对非线程安全的<code>list</code>进行写入操作</strong>。</li>
+</ol>
+<h2 id="解决方案">解决方案</h2>
+<ol>
+<li>细化<code>synchronized</code>锁粒度，改成对<strong>写</strong>非线程安全的<code>list</code>加锁：<code>synchronized (list)</code>。</li>
+</ol>
+<h2 id="性能提升">性能提升</h2>
+<p>更改后，外呼数量由每分钟1w通提升为1.8w通，性能提升<strong>1.8倍</strong>。</p>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li>
+<ul>
+<li><a href="#%E9%97%AE%E9%A2%98%E6%8F%8F%E8%BF%B0">问题描述</a></li>
+<li><a href="#%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88">解决方案</a></li>
+<li><a href="#%E6%80%A7%E8%83%BD%E6%8F%90%E5%8D%87">性能提升</a></li>
+</ul>
+</li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://asynchronemind.github.io/post/ji-yu-redis-shi-xian-ci-shu-xian-e-pei-zhi/">
+              <h3 class="post-title">
+                基于 Redis 实现次数限额配置
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  <a href="https://github.com/AsynchroneMind">Asynn</a> 
+  <a class="rss" href="https://asynchronemind.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

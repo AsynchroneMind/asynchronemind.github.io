@@ -1,0 +1,407 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+    <id>https://asynchronemind.github.io</id>
+    <title>Asynn</title>
+    <updated>2024-07-29T07:44:25.648Z</updated>
+    <generator>https://github.com/jpmonette/feed</generator>
+    <link rel="alternate" href="https://asynchronemind.github.io"/>
+    <link rel="self" href="https://asynchronemind.github.io/atom.xml"/>
+    <subtitle>习惯无常才会庆幸。</subtitle>
+    <logo>https://asynchronemind.github.io/images/avatar.png</logo>
+    <icon>https://asynchronemind.github.io/favicon.ico</icon>
+    <rights>All rights reserved 2024, Asynn</rights>
+    <entry>
+        <title type="html"><![CDATA[基于调整分布式锁的核心外呼并发性能提升]]></title>
+        <id>https://asynchronemind.github.io/post/ji-yu-diao-zheng-fen-bu-shi-suo-de-he-xin-wai-hu-bing-fa-xing-neng-ti-sheng/</id>
+        <link href="https://asynchronemind.github.io/post/ji-yu-diao-zheng-fen-bu-shi-suo-de-he-xin-wai-hu-bing-fa-xing-neng-ti-sheng/">
+        </link>
+        <updated>2024-07-20T10:49:13.000Z</updated>
+        <content type="html"><![CDATA[<h2 id="问题描述">问题描述</h2>
+<p>在前几天工作日处理完需求后看了看整个系统的核心功能：<strong>发起外呼</strong>的源码实现。<br>
+具体实现流程：<br>
+<img src="https://asynchronemind.github.io/post-images/1721473754429.png" alt="" loading="lazy"><br>
+在<code>FreeSwitchClientUtil</code>中存在：</p>
+<pre><code class="language-java">public static void callOut(String bussType, String command, String api){ // 调用的主方法
+    getInstace(getClusterId(bussType)).callOut(command, api);
+}
+
+private static FreeswitchClient getInstace(String clusterId) {
+    FreeswitchClient instance = null;
+    if (clusterMap.get(clusterId) == null){
+        synchronized (FreeswitchClientUtil.class){
+            FreeswitchNginxInfo info = staticFreeswitchInfoService.getNginxInfo(clusterId).getObj();
+            if (info == null){
+                throw new RuntimeException(&quot;未获取到集群信息,clusterId : &quot; + clusterId);
+            }
+            if (clusterMap.get(clusterId) == null){
+                instance = new FreeswitchClient(clusterId, info.getAddr(), info.getAuthorization());
+                clusterMap.put(clusterId, instance);
+            }
+        }
+    } else {
+        instance = clusterMap.get(clusterId);
+    }
+    // ...
+}
+
+/**
+    * 根据业务类型分流策略选择集群ID
+    * */
+private static String getClusterId(String bussType) {
+    String clusterId = &quot;&quot;;
+    List&lt;FreeswitchRouteConf&gt; list = null;
+    if (bussTypeRouteMap.get(bussType) == null){
+        synchronized (FreeswitchClientUtil.class){
+            list = staticFreeswitchInfoService.getRouteConf(bussType).getObj();
+            bussTypeRouteMap.put(bussType, list);
+        }
+    } else {
+        list = bussTypeRouteMap.get(bussType);
+    }
+    if (CollectionUtils.isEmpty(list)){
+        throw new RuntimeException();
+    }
+    // ...
+}
+</code></pre>
+<p>其中<code>clusterMap</code>、<code>bussTypeRouteMap</code>都是<code>ConcurrentHashMap</code>。<br>
+于是我便发现问题：</p>
+<ol>
+<li><code>synchronized (FreeswitchClientUtil.class)</code>锁粒度太粗。</li>
+<li><code>synchronized</code>和线程安全的<code>ConcurrentHashMap</code>重叠套用，并且<code>ConcurrentHashMap</code>中没有<strong>非原子</strong>操作，可以完全保障并发安全性。</li>
+<li><strong>核心在于对非线程安全的<code>list</code>进行写入操作</strong>。</li>
+</ol>
+<h2 id="解决方案">解决方案</h2>
+<ol>
+<li>细化<code>synchronized</code>锁粒度，改成对<strong>写</strong>非线程安全的<code>list</code>加锁：<code>synchronized (list)</code>。</li>
+</ol>
+<h2 id="性能提升">性能提升</h2>
+<p>更改后，外呼数量由每分钟1w通提升为1.8w通，性能提升<strong>1.8倍</strong>。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[基于 Redis 实现次数限额配置]]></title>
+        <id>https://asynchronemind.github.io/post/ji-yu-redis-shi-xian-ci-shu-xian-e-pei-zhi/</id>
+        <link href="https://asynchronemind.github.io/post/ji-yu-redis-shi-xian-ci-shu-xian-e-pei-zhi/">
+        </link>
+        <updated>2024-07-20T09:24:11.000Z</updated>
+        <content type="html"><![CDATA[<h2 id="需求描述">需求描述</h2>
+<p>需要新增一个功能：外呼次数达到上限停止外呼。</p>
+<h2 id="解决方案">解决方案</h2>
+<ul>
+<li>原来的流程图：<br>
+<img src="https://asynchronemind.github.io/post-images/1721469538795.png" alt="" loading="lazy"></li>
+<li>现在的流程图：<br>
+<img src="https://asynchronemind.github.io/post-images/1721469607830.png" alt="" loading="lazy"></li>
+</ul>
+<h3 id="详细流程">详细流程</h3>
+<ol>
+<li>存储结构选择：</li>
+</ol>
+<ul>
+<li>Hash：存储结构设为&lt;不同任务类型前缀，&lt;客户手机号，次数&gt;&gt;。</li>
+<li><strong>键值对</strong>：存储结构设为&lt;不同任务类型前缀_客户手机号，次数&gt;。<br>
+因为公司已存在<code>Redis</code>对应工具类，其中并没有对<code>Hash</code>数据结构的键设置过期时间的实现，所以选用<strong>键值对</strong>作为最终实现方案存储结构。</li>
+</ul>
+<ol start="2">
+<li>
+<p>初版方案：</p>
+<ul>
+<li>实现过程在上面流程图中已经说明清楚，记录呼叫次数理所当然选用<code>increment</code>操作实现，并设置过期时间为当天剩余时间。因为要在多个地方使用，所以抽象出一个方法来：<pre><code class="language-java">@Component
+public class HhtRedisUtil extends RedisUtil {
+    public void setOrIncr(String key) {
+        if(!keyExists(key)) {
+            Calendar now = Calendar.getInstance();
+            Calendar endOfDay = (Calendar) now.clone();
+            endOfDay.set(Calendar.HOUR_OF_DAY, 23);
+            endOfDay.set(Calendar.MINUTE, 59);
+            endOfDay.set(Calendar.SECOND, 59);
+            endOfDay.set(Calendar.MILLISECOND, 999);
+            long expireTime = endOfDay.getTimeInMillis() - now.getTimeInMillis();
+            expireTime = Math.max(1, expireTime / 1000L);
+            set(key, &quot;1&quot;, expireTime);
+        } else {
+            incr(key, 1);
+        }
+    }
+}
+</code></pre>
+</li>
+<li>具体存储过程：<pre><code class="language-java">if(!StrUtils.isNil(calloutConfFeignService.getSysParam(prefix, true).getObj())) { // 生产必不可少的开关 0.0
+    String redisKey = prefix + &quot;_&quot; + EncryptAndDecryptUtil.encrypt(OperType.ENCRYPT, EDataType.PHONE_NO,record.getCalledNum());
+    hhtRedisUtil.setOrIncr(redisKey);
+}
+</code></pre>
+</li>
+</ul>
+</li>
+<li>
+<p>面临的问题：<br>
+因为之前所实现的<code>RedisUtil</code>中注入的为：</p>
+<pre><code class="language-java">public class RedisUtil {
+ @Autowired
+ private RedisTemplate&lt;String, String&gt; redisTemplate;
+
+</code></pre>
+<p>导致键值对初始化时设置的值为<code>String</code>类型的&quot;1&quot;，致使后续的<code>incr(key, 1)</code>因为类型不匹配而<strong>报错</strong>。</p>
+</li>
+<li>
+<p>最终解决思路：</p>
+<ul>
+<li>首先工具类是肯定不能改的，因为别的地方已经使用过很多次了，改了不知道会出啥问题，所以<strong>改泛型</strong>的思路被否决。</li>
+<li>然后了解到<code>Redis</code>的<code>increment</code>在<strong>键不存在时会新建</strong>，并返回值为1。于是改为：<pre><code class="language-java">public void setOrIncr(String key) {
+    long pnt = incr(key, 1);
+    if(pnt == 1L) {
+        Calendar now = Calendar.getInstance();
+        Calendar endOfDay = (Calendar) now.clone();
+        endOfDay.set(Calendar.HOUR_OF_DAY, 23);
+        endOfDay.set(Calendar.MINUTE, 59);
+        endOfDay.set(Calendar.SECOND, 59);
+        endOfDay.set(Calendar.MILLISECOND, 999);
+        long expireTime = endOfDay.getTimeInMillis() - now.getTimeInMillis();
+        expireTime = Math.max(1, expireTime  / 1000L);
+        setExpire(key, expireTime);
+        }
+    }
+}
+</code></pre>
+于是问题解决。</li>
+</ul>
+</li>
+</ol>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[基于定时任务实现 Kafka 消息多次投放]]></title>
+        <id>https://asynchronemind.github.io/post/ji-yu-ding-shi-ren-wu-shi-xian-kafka-xiao-xi-duo-ci-tou-fang/</id>
+        <link href="https://asynchronemind.github.io/post/ji-yu-ding-shi-ren-wu-shi-xian-kafka-xiao-xi-duo-ci-tou-fang/">
+        </link>
+        <updated>2024-07-14T08:15:27.000Z</updated>
+        <content type="html"><![CDATA[<h2 id="需求描述">需求描述</h2>
+<p>前面提到与下游项目进行对接时，其中一类对接途径由<code>kafka</code>来实现。<br>
+需要将由本项目实现并记录的多类信息投放至<code>kafka</code>的同一Topic: <code>XXX_LOG_TO_PRODUCER</code>下。<br>
+流程图如下：<br>
+<img src="https://asynchronemind.github.io/post-images/1720946220284.png" alt="" loading="lazy"><br>
+我们知道，现有消息队列，如：Kafka、RocketMQ等，为了保证消息消费的鲁棒性，都实现了各自的重复消费机制。<br>
+但是，<strong>在上述流程图中却没有一个保障消息能够被安全投放至<code>Producer</code>的措施。</strong><br>
+虽然我在<code>sendToKafka</code>中使用了<code>try...catch...</code>来捕获可能出现的异常并记录在日志里，但这种方法只能起一个提醒作用，还是得在花费时间查看<strong>错误日志</strong>的情况下才生效，并不能满足上述需求。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>由于最近正好在看项目中使用定时任务的场景，便想到了是否能多增加一个定时任务来实现投放消息，从而解决消息投放安全的问题。<br>
+<img src="https://asynchronemind.github.io/post-images/1720948805082.png" alt="" loading="lazy"><br>
+跟mt沟通交流了一下之后，mt表示肯定，便找产品给我提了这个需求😲。<br>
+因为公司项目定时任务统一组件使用的是<code>Saturn</code>，在这里就不比较市面上现存的定时任务实现方案孰优孰劣了。</p>
+<h3 id="介绍一下saturn">介绍一下<code>Saturn</code>：</h3>
+<figure data-type="image" tabindex="1"><img src="https://asynchronemind.github.io/post-images/1722238970302.png" alt="" loading="lazy"></figure>
+<ul>
+<li>唯品会自主研发的分布式的定时任务调度平台，目的是取代传统的Linux Cron、Spring Batch Job、Quartz的方式，做到全域统一配置，统一监控，任务高可用以及分片。</li>
+<li>支持基于时间和事件触发、人工指定资源分配策略和自动平衡策略结合、任务开发语言不受限制、支持一机一分片的本地化模式任务调度、任务按分片执行、框架和业务代码隔离、分片的调度按负载均衡分布、可视化管理、支持秒级任务触发、可视化监控和报警、支持容器化 (Docker) 部署。</li>
+</ul>
+<h3 id="具体使用">具体使用：</h3>
+<ol>
+<li>添加<code>pom</code>。</li>
+<li>继承<code>AbstractSaturnJavaJob</code>类，重写<code>handleJavaJob</code>方法。<pre><code class="language-java">@Slf4j
+@Component
+public class RePushCalllogJob extends AbstractSaturnJavaJob {
+
+    @Override
+    public SaturnJobReturn handleJavaJob(String jobName, Integer shardItem, String shardParam, SaturnJobExecutionContext saturnJobExecutionContext) throws InterruptedException {
+        long begin = System.currentTimeMillis();
+        SaturnJobReturn saturnJobReturn = new SaturnJobReturn();
+        log.info(&quot;RePushCalllogJob job start: jobName={}, shardItem={}, shardParam={}, jobParameter={}&quot;, jobName, shardItem, shardParam, saturnJobExecutionContext.getJobParameter().trim());
+        try {
+            process(shardParam);
+            saturnJobReturn.setReturnMsg(&quot;Execute RePushCalllogJob successfully&quot;);
+        } catch (Exception e) {
+            log.warn(&quot;Execute RePushCalllogJob failed&quot;, e);
+            saturnJobReturn.setReturnMsg(&quot;Execute RePushCalllogJob failed&quot;);
+            saturnJobReturn.setReturnCode(-1);
+        }
+        log.info(&quot;RePushCalllogJob job end: duration={}&quot;, System.currentTimeMillis() - begin);
+        return saturnJobReturn;
+    }
+</code></pre>
+</li>
+<li>具体投放任务实现。<pre><code class="language-java">private void process(String shardParam) {
+    if (StringUtils.isBlank(shardParam)) {
+        log.warn(&quot;Shard param is empty&quot;);
+        return;
+    }
+    String[] tempStr = StringUtils.split(shardParam, &quot;#&quot;);
+    long start = Long.parseLong(tempStr[1]);
+    long end = Long.parseLong(tempStr[2]) + 1;//start和end都要执行
+    if (start &gt;= end) {
+        log.warn(&quot;ID range is invalid&quot;);
+        return;
+    }
+    for (long offStart = start; offStart &lt; end; offStart = offStart + PAGE_SIZE) {
+        long offEnd = Math.min(offStart + PAGE_SIZE, end);
+
+        switch (tempStr[0].toLowerCase()) {
+            case &quot;aaa_calllog&quot;:
+                processaaaCallLog(offStart, offEnd);
+                break;
+            case &quot;bbb_calllog&quot;:
+                processbbbCallLog(offStart, offEnd);
+                break;
+            case &quot;ccc_calllog&quot;:
+                processcccCallLog(offStart, offEnd);
+                break;
+            case &quot;dddr_calllog&quot;:
+                processdddrCallLog(offStart, offEnd);
+                break;
+            case &quot;eee_calllog&quot;:
+                processeeeCallLog(offStart, offEnd);
+                break;
+            default:
+                log.warn(&quot;Unknown call log&quot;);
+                return;
+        }
+    }
+}
+</code></pre>
+</li>
+<li>设置开启时间。</li>
+</ol>
+<h3 id="后续流程">后续流程：</h3>
+<ol>
+<li>可以发现我们只是实现根据数据范围进行批量投放，可能会存在下游任务重复消费的问题，需要与下游进行拉通，让他们加上一个<strong>幂等</strong>逻辑，<strong>防止消息重复消费</strong>。</li>
+</ol>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[Spring 自动注入为 null 的问题排查]]></title>
+        <id>https://asynchronemind.github.io/post/spring-zi-dong-zhu-ru-wei-null-de-wen-ti-pai-cha/</id>
+        <link href="https://asynchronemind.github.io/post/spring-zi-dong-zhu-ru-wei-null-de-wen-ti-pai-cha/">
+        </link>
+        <updated>2024-07-09T14:21:53.000Z</updated>
+        <content type="html"><![CDATA[<h2 id="问题">问题</h2>
+<p>在前文使用策略模式抽象消息推送<code>kafka</code>后，第一次推测试流水线果然报错。<br>
+远程<code>bash</code>容器查看日志，对应具体实现类中投放<code>Topic</code>的生产者方法爆<strong>空指针异常</strong>：</p>
+<pre><code class="language-java">@Autowired
+private CalllogProducer calllogProducer;
+
+calllogProducer.sendMsg(JSONObject.toJSONString(calllog));
+</code></pre>
+<p>注入不进去的现象让我十分不解。</p>
+<h2 id="定位">定位</h2>
+<p>在网上查找相关内容，快速定位到<strong>Spring不会为不是由它创建的对象进行依赖注入</strong>。<br>
+原因出在：</p>
+<pre><code class="language-java">strategies.put(HhtTaskData.class, new HhtKafkaSendStrategy());
+strategies.put(HhtReceiveTask.class, new HhtReceiveKafkaSendStrategy());
+strategies.put(CalloutDetailRecord.class, new OrderKafkaSendStrategy());
+strategies.put(AbnAsrDetailRecordReq.class, new AbnKafkaSendStrategy());
+</code></pre>
+<p>注册具体实现方法时，手动<code>new</code>出来了实现方法对象。</p>
+<h2 id="解决">解决</h2>
+<ol>
+<li>起初想用<code>@Autowired</code>给<code>Spring</code>来创建具体实现方法对象，但紧接着需要改动<code>strategies</code>原本数据结构：<code>HashMap&lt;Class&lt;?&gt;, KafkaSendStrategy&gt;</code>，以及分发策略，十分麻烦。</li>
+<li>转换思路，放弃<code>Spring</code>注入<code>CalllogProducer</code>，而是更改生产者方法为静态，改动较小，并且别的地方的引用也便于定位：<pre><code class="language-java"> private ProducerPool producerPool; -&gt;  private static ProducerPool producerPool;
+ private String topic; -&gt; private static String topic;
+
+ public void sendMsg(String msg) { } -&gt; public static void sendMsg(String msg) { }
+ 
+ // 然后在实现类中调用
+ CalllogProducer.sendMsg(JSONObject.toJSONString(calllog));
+</code></pre>
+</li>
+</ol>
+<pre><code>
+</code></pre>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[基于策略模式实现多个方法抽象化]]></title>
+        <id>https://asynchronemind.github.io/post/ji-yu-ce-lue-mo-shi-shi-xian-duo-ge-fang-fa-chou-xiang-hua/</id>
+        <link href="https://asynchronemind.github.io/post/ji-yu-ce-lue-mo-shi-shi-xian-duo-ge-fang-fa-chou-xiang-hua/">
+        </link>
+        <updated>2024-07-07T02:32:15.000Z</updated>
+        <content type="html"><![CDATA[<h2 id="需求描述">需求描述</h2>
+<p>我们所负责项目属于一个中间项目，需要与下游项目进行对接，其中一类对接途径由<code>kafka</code>来实现。<br>
+需要将由本项目实现并记录的多类信息投放至<code>kafka</code>的同一<code>Topic: XXX_LOG_TO_PRODUCER</code>下。</p>
+<h2 id="现有成果">现有成果</h2>
+<p>已存在一个函数对A类信息进行投放：</p>
+<pre><code class="language-java">private void sendToKafka(AAADetailRecord record, AAATaskData Task, AAATemplate Template) 
+</code></pre>
+<p>调用时机为A类信息落库时。</p>
+<h2 id="解决方案">解决方案</h2>
+<ul>
+<li>已知信息：
+<ol>
+<li>其余类信息均已实现落库操作。</li>
+<li>不同类具有不同的任务<code>id</code>标识。</li>
+<li>投放到<code>kafka</code>需有统一的<code>json</code>字段。</li>
+</ol>
+</li>
+<li>解决思路
+<ol>
+<li>在每一个类的落库操作中定义对应类的投放函数。（直觉实现方式，但太冗余，不想去写。）</li>
+<li>创建一个独立的类，传参抽象出一个父类属性，如<code>XXXDetailRecord</code>。（需要重新定义抽象实体以及找到每个类中携带信息的实体，太麻烦，并且改动很大。）<pre><code class="language-java">public class KafkaSender {
+
+    public void sendToKafka(XXXDetailRecord record, XXXTaskData Task, XXXTemplate Template)
+}
+</code></pre>
+</li>
+<li>定义泛型。（感觉也不好实现。）</li>
+<li>方法重载。（还行，但标题是策略模式，就不采用了。）</li>
+<li><strong>策略模式</strong>。</li>
+</ol>
+</li>
+</ul>
+<p>首先定义一个接口：</p>
+<pre><code class="language-java">public interface KafkaSendStrategy {
+    void send(Object... params); // 因为可能每个类得到字段所需参数不一样，所以采用不定参数
+}
+</code></pre>
+<p>实现不同策略：</p>
+<pre><code class="language-java">public class AAASendStrategy implements KafkaSendStrategy {
+    @Override
+    public void send(Object... params) {
+        AAADetailRecord record = (AAADetailRecord) params[0];
+        AAATaskData task = (AAATaskData) params[1];
+        AAATemplate template = (AAATemplate) params[2];
+        // 处理 AAADetailRecord 类型参数
+    }
+}
+
+public class AnotherSendStrategy implements KafkaSendStrategy {
+    @Override
+    public void send(Object... params) {
+        AnotherDetailRecord record = (AnotherDetailRecord) params[0];
+        AnotherTaskData task = (AnotherTaskData) params[1];
+        AnotherTemplate template = (AnotherTemplate) params[2];
+        // 处理 AnotherDetailRecord 类型参数
+    }
+}
+</code></pre>
+<p>存放<code>HashMap</code>：</p>
+<pre><code class="language-java">public class KafkaSender {
+    private final Map&lt;Class&lt;?&gt;, KafkaSendStrategy&gt; strategies = new HashMap&lt;&gt;();
+
+    public KafkaSender() {
+        strategies.put(AAADetailRecord.class, new HhtSendStrategy());
+        strategies.put(AnotherDetailRecord.class, new AnotherSendStrategy());
+        // 添加更多策略
+    }
+
+    public void sendToKafka(Object... params) {
+        if (params.length &gt; 0) {
+            Class&lt;?&gt; paramClass = params[0].getClass(); // 根据不同类信息得到不同方法
+            KafkaSendStrategy strategy = strategies.get(paramClass);
+            if (strategy != null) {
+                strategy.send(params);
+            } else {
+                throw new IllegalArgumentException(&quot;No strategy found for class: &quot; + paramClass);
+            }
+        } else {
+            throw new IllegalArgumentException(&quot;No parameters provided&quot;);
+        }
+    }
+}
+</code></pre>
+<p>最后使用：</p>
+<pre><code class="language-java">KafkaSender kafkaSender = new KafkaSender();
+kafkaSender.sendToKafka(record, task, template);
+</code></pre>
+]]></content>
+    </entry>
+</feed>

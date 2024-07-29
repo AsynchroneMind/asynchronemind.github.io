@@ -1,0 +1,237 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>基于策略模式实现多个方法抽象化 | Asynn</title>
+<link rel="shortcut icon" href="https://asynchronemind.github.io/favicon.ico?v=1722239062648">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://asynchronemind.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="基于策略模式实现多个方法抽象化 | Asynn - Atom Feed" href="https://asynchronemind.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="需求描述
+我们所负责项目属于一个中间项目，需要与下游项目进行对接，其中一类对接途径由kafka来实现。
+需要将由本项目实现并记录的多类信息投放至kafka的同一Topic: XXX_LOG_TO_PRODUCER下。
+现有成果
+已存在一个函..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://asynchronemind.github.io">
+  <img class="avatar" src="https://asynchronemind.github.io/images/avatar.png?v=1722239062648" alt="">
+  </a>
+  <h1 class="site-title">
+    Asynn
+  </h1>
+  <p class="site-description">
+    习惯无常才会庆幸。
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              基于策略模式实现多个方法抽象化
+            </h2>
+            <div class="post-info">
+              <span>
+                2024-07-07
+              </span>
+              <span>
+                3 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h2 id="需求描述">需求描述</h2>
+<p>我们所负责项目属于一个中间项目，需要与下游项目进行对接，其中一类对接途径由<code>kafka</code>来实现。<br>
+需要将由本项目实现并记录的多类信息投放至<code>kafka</code>的同一<code>Topic: XXX_LOG_TO_PRODUCER</code>下。</p>
+<h2 id="现有成果">现有成果</h2>
+<p>已存在一个函数对A类信息进行投放：</p>
+<pre><code class="language-java">private void sendToKafka(AAADetailRecord record, AAATaskData Task, AAATemplate Template) 
+</code></pre>
+<p>调用时机为A类信息落库时。</p>
+<h2 id="解决方案">解决方案</h2>
+<ul>
+<li>已知信息：
+<ol>
+<li>其余类信息均已实现落库操作。</li>
+<li>不同类具有不同的任务<code>id</code>标识。</li>
+<li>投放到<code>kafka</code>需有统一的<code>json</code>字段。</li>
+</ol>
+</li>
+<li>解决思路
+<ol>
+<li>在每一个类的落库操作中定义对应类的投放函数。（直觉实现方式，但太冗余，不想去写。）</li>
+<li>创建一个独立的类，传参抽象出一个父类属性，如<code>XXXDetailRecord</code>。（需要重新定义抽象实体以及找到每个类中携带信息的实体，太麻烦，并且改动很大。）<pre><code class="language-java">public class KafkaSender {
+
+    public void sendToKafka(XXXDetailRecord record, XXXTaskData Task, XXXTemplate Template)
+}
+</code></pre>
+</li>
+<li>定义泛型。（感觉也不好实现。）</li>
+<li>方法重载。（还行，但标题是策略模式，就不采用了。）</li>
+<li><strong>策略模式</strong>。</li>
+</ol>
+</li>
+</ul>
+<p>首先定义一个接口：</p>
+<pre><code class="language-java">public interface KafkaSendStrategy {
+    void send(Object... params); // 因为可能每个类得到字段所需参数不一样，所以采用不定参数
+}
+</code></pre>
+<p>实现不同策略：</p>
+<pre><code class="language-java">public class AAASendStrategy implements KafkaSendStrategy {
+    @Override
+    public void send(Object... params) {
+        AAADetailRecord record = (AAADetailRecord) params[0];
+        AAATaskData task = (AAATaskData) params[1];
+        AAATemplate template = (AAATemplate) params[2];
+        // 处理 AAADetailRecord 类型参数
+    }
+}
+
+public class AnotherSendStrategy implements KafkaSendStrategy {
+    @Override
+    public void send(Object... params) {
+        AnotherDetailRecord record = (AnotherDetailRecord) params[0];
+        AnotherTaskData task = (AnotherTaskData) params[1];
+        AnotherTemplate template = (AnotherTemplate) params[2];
+        // 处理 AnotherDetailRecord 类型参数
+    }
+}
+</code></pre>
+<p>存放<code>HashMap</code>：</p>
+<pre><code class="language-java">public class KafkaSender {
+    private final Map&lt;Class&lt;?&gt;, KafkaSendStrategy&gt; strategies = new HashMap&lt;&gt;();
+
+    public KafkaSender() {
+        strategies.put(AAADetailRecord.class, new HhtSendStrategy());
+        strategies.put(AnotherDetailRecord.class, new AnotherSendStrategy());
+        // 添加更多策略
+    }
+
+    public void sendToKafka(Object... params) {
+        if (params.length &gt; 0) {
+            Class&lt;?&gt; paramClass = params[0].getClass(); // 根据不同类信息得到不同方法
+            KafkaSendStrategy strategy = strategies.get(paramClass);
+            if (strategy != null) {
+                strategy.send(params);
+            } else {
+                throw new IllegalArgumentException(&quot;No strategy found for class: &quot; + paramClass);
+            }
+        } else {
+            throw new IllegalArgumentException(&quot;No parameters provided&quot;);
+        }
+    }
+}
+</code></pre>
+<p>最后使用：</p>
+<pre><code class="language-java">KafkaSender kafkaSender = new KafkaSender();
+kafkaSender.sendToKafka(record, task, template);
+</code></pre>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li>
+<ul>
+<li><a href="#%E9%9C%80%E6%B1%82%E6%8F%8F%E8%BF%B0">需求描述</a></li>
+<li><a href="#%E7%8E%B0%E6%9C%89%E6%88%90%E6%9E%9C">现有成果</a></li>
+<li><a href="#%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88">解决方案</a></li>
+</ul>
+</li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+
+        
+
+        <div class="site-footer">
+  <a href="https://github.com/AsynchroneMind">Asynn</a> 
+  <a class="rss" href="https://asynchronemind.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

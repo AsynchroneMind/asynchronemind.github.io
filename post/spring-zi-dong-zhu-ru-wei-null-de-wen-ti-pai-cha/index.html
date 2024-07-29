@@ -1,0 +1,192 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spring 自动注入为 null 的问题排查 | Asynn</title>
+<link rel="shortcut icon" href="https://asynchronemind.github.io/favicon.ico?v=1722239062648">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://asynchronemind.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="Spring 自动注入为 null 的问题排查 | Asynn - Atom Feed" href="https://asynchronemind.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="问题
+在前文使用策略模式抽象消息推送kafka后，第一次推测试流水线果然报错。
+远程bash容器查看日志，对应具体实现类中投放Topic的生产者方法爆空指针异常：
+@Autowired
+private CalllogProducer cal..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://asynchronemind.github.io">
+  <img class="avatar" src="https://asynchronemind.github.io/images/avatar.png?v=1722239062648" alt="">
+  </a>
+  <h1 class="site-title">
+    Asynn
+  </h1>
+  <p class="site-description">
+    习惯无常才会庆幸。
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              Spring 自动注入为 null 的问题排查
+            </h2>
+            <div class="post-info">
+              <span>
+                2024-07-09
+              </span>
+              <span>
+                2 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h2 id="问题">问题</h2>
+<p>在前文使用策略模式抽象消息推送<code>kafka</code>后，第一次推测试流水线果然报错。<br>
+远程<code>bash</code>容器查看日志，对应具体实现类中投放<code>Topic</code>的生产者方法爆<strong>空指针异常</strong>：</p>
+<pre><code class="language-java">@Autowired
+private CalllogProducer calllogProducer;
+
+calllogProducer.sendMsg(JSONObject.toJSONString(calllog));
+</code></pre>
+<p>注入不进去的现象让我十分不解。</p>
+<h2 id="定位">定位</h2>
+<p>在网上查找相关内容，快速定位到<strong>Spring不会为不是由它创建的对象进行依赖注入</strong>。<br>
+原因出在：</p>
+<pre><code class="language-java">strategies.put(HhtTaskData.class, new HhtKafkaSendStrategy());
+strategies.put(HhtReceiveTask.class, new HhtReceiveKafkaSendStrategy());
+strategies.put(CalloutDetailRecord.class, new OrderKafkaSendStrategy());
+strategies.put(AbnAsrDetailRecordReq.class, new AbnKafkaSendStrategy());
+</code></pre>
+<p>注册具体实现方法时，手动<code>new</code>出来了实现方法对象。</p>
+<h2 id="解决">解决</h2>
+<ol>
+<li>起初想用<code>@Autowired</code>给<code>Spring</code>来创建具体实现方法对象，但紧接着需要改动<code>strategies</code>原本数据结构：<code>HashMap&lt;Class&lt;?&gt;, KafkaSendStrategy&gt;</code>，以及分发策略，十分麻烦。</li>
+<li>转换思路，放弃<code>Spring</code>注入<code>CalllogProducer</code>，而是更改生产者方法为静态，改动较小，并且别的地方的引用也便于定位：<pre><code class="language-java"> private ProducerPool producerPool; -&gt;  private static ProducerPool producerPool;
+ private String topic; -&gt; private static String topic;
+
+ public void sendMsg(String msg) { } -&gt; public static void sendMsg(String msg) { }
+ 
+ // 然后在实现类中调用
+ CalllogProducer.sendMsg(JSONObject.toJSONString(calllog));
+</code></pre>
+</li>
+</ol>
+<pre><code>
+</code></pre>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li>
+<ul>
+<li><a href="#%E9%97%AE%E9%A2%98">问题</a></li>
+<li><a href="#%E5%AE%9A%E4%BD%8D">定位</a></li>
+<li><a href="#%E8%A7%A3%E5%86%B3">解决</a></li>
+</ul>
+</li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://asynchronemind.github.io/post/ji-yu-ce-lue-mo-shi-shi-xian-duo-ge-fang-fa-chou-xiang-hua/">
+              <h3 class="post-title">
+                基于策略模式实现多个方法抽象化
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  <a href="https://github.com/AsynchroneMind">Asynn</a> 
+  <a class="rss" href="https://asynchronemind.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

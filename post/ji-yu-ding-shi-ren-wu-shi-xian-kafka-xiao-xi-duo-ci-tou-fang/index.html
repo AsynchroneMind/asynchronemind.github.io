@@ -1,0 +1,254 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>基于定时任务实现 Kafka 消息多次投放 | Asynn</title>
+<link rel="shortcut icon" href="https://asynchronemind.github.io/favicon.ico?v=1722239062648">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://asynchronemind.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="基于定时任务实现 Kafka 消息多次投放 | Asynn - Atom Feed" href="https://asynchronemind.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="需求描述
+前面提到与下游项目进行对接时，其中一类对接途径由kafka来实现。
+需要将由本项目实现并记录的多类信息投放至kafka的同一Topic: XXX_LOG_TO_PRODUCER下。
+流程图如下：
+
+我们知道，现有消息队列，如：Ka..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://asynchronemind.github.io">
+  <img class="avatar" src="https://asynchronemind.github.io/images/avatar.png?v=1722239062648" alt="">
+  </a>
+  <h1 class="site-title">
+    Asynn
+  </h1>
+  <p class="site-description">
+    习惯无常才会庆幸。
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              基于定时任务实现 Kafka 消息多次投放
+            </h2>
+            <div class="post-info">
+              <span>
+                2024-07-14
+              </span>
+              <span>
+                4 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h2 id="需求描述">需求描述</h2>
+<p>前面提到与下游项目进行对接时，其中一类对接途径由<code>kafka</code>来实现。<br>
+需要将由本项目实现并记录的多类信息投放至<code>kafka</code>的同一Topic: <code>XXX_LOG_TO_PRODUCER</code>下。<br>
+流程图如下：<br>
+<img src="https://asynchronemind.github.io/post-images/1720946220284.png" alt="" loading="lazy"><br>
+我们知道，现有消息队列，如：Kafka、RocketMQ等，为了保证消息消费的鲁棒性，都实现了各自的重复消费机制。<br>
+但是，<strong>在上述流程图中却没有一个保障消息能够被安全投放至<code>Producer</code>的措施。</strong><br>
+虽然我在<code>sendToKafka</code>中使用了<code>try...catch...</code>来捕获可能出现的异常并记录在日志里，但这种方法只能起一个提醒作用，还是得在花费时间查看<strong>错误日志</strong>的情况下才生效，并不能满足上述需求。</p>
+<h2 id="解决方案">解决方案</h2>
+<p>由于最近正好在看项目中使用定时任务的场景，便想到了是否能多增加一个定时任务来实现投放消息，从而解决消息投放安全的问题。<br>
+<img src="https://asynchronemind.github.io/post-images/1720948805082.png" alt="" loading="lazy"><br>
+跟mt沟通交流了一下之后，mt表示肯定，便找产品给我提了这个需求😲。<br>
+因为公司项目定时任务统一组件使用的是<code>Saturn</code>，在这里就不比较市面上现存的定时任务实现方案孰优孰劣了。</p>
+<h3 id="介绍一下saturn">介绍一下<code>Saturn</code>：</h3>
+<figure data-type="image" tabindex="1"><img src="https://asynchronemind.github.io/post-images/1722238970302.png" alt="" loading="lazy"></figure>
+<ul>
+<li>唯品会自主研发的分布式的定时任务调度平台，目的是取代传统的Linux Cron、Spring Batch Job、Quartz的方式，做到全域统一配置，统一监控，任务高可用以及分片。</li>
+<li>支持基于时间和事件触发、人工指定资源分配策略和自动平衡策略结合、任务开发语言不受限制、支持一机一分片的本地化模式任务调度、任务按分片执行、框架和业务代码隔离、分片的调度按负载均衡分布、可视化管理、支持秒级任务触发、可视化监控和报警、支持容器化 (Docker) 部署。</li>
+</ul>
+<h3 id="具体使用">具体使用：</h3>
+<ol>
+<li>添加<code>pom</code>。</li>
+<li>继承<code>AbstractSaturnJavaJob</code>类，重写<code>handleJavaJob</code>方法。<pre><code class="language-java">@Slf4j
+@Component
+public class RePushCalllogJob extends AbstractSaturnJavaJob {
+
+    @Override
+    public SaturnJobReturn handleJavaJob(String jobName, Integer shardItem, String shardParam, SaturnJobExecutionContext saturnJobExecutionContext) throws InterruptedException {
+        long begin = System.currentTimeMillis();
+        SaturnJobReturn saturnJobReturn = new SaturnJobReturn();
+        log.info(&quot;RePushCalllogJob job start: jobName={}, shardItem={}, shardParam={}, jobParameter={}&quot;, jobName, shardItem, shardParam, saturnJobExecutionContext.getJobParameter().trim());
+        try {
+            process(shardParam);
+            saturnJobReturn.setReturnMsg(&quot;Execute RePushCalllogJob successfully&quot;);
+        } catch (Exception e) {
+            log.warn(&quot;Execute RePushCalllogJob failed&quot;, e);
+            saturnJobReturn.setReturnMsg(&quot;Execute RePushCalllogJob failed&quot;);
+            saturnJobReturn.setReturnCode(-1);
+        }
+        log.info(&quot;RePushCalllogJob job end: duration={}&quot;, System.currentTimeMillis() - begin);
+        return saturnJobReturn;
+    }
+</code></pre>
+</li>
+<li>具体投放任务实现。<pre><code class="language-java">private void process(String shardParam) {
+    if (StringUtils.isBlank(shardParam)) {
+        log.warn(&quot;Shard param is empty&quot;);
+        return;
+    }
+    String[] tempStr = StringUtils.split(shardParam, &quot;#&quot;);
+    long start = Long.parseLong(tempStr[1]);
+    long end = Long.parseLong(tempStr[2]) + 1;//start和end都要执行
+    if (start &gt;= end) {
+        log.warn(&quot;ID range is invalid&quot;);
+        return;
+    }
+    for (long offStart = start; offStart &lt; end; offStart = offStart + PAGE_SIZE) {
+        long offEnd = Math.min(offStart + PAGE_SIZE, end);
+
+        switch (tempStr[0].toLowerCase()) {
+            case &quot;aaa_calllog&quot;:
+                processaaaCallLog(offStart, offEnd);
+                break;
+            case &quot;bbb_calllog&quot;:
+                processbbbCallLog(offStart, offEnd);
+                break;
+            case &quot;ccc_calllog&quot;:
+                processcccCallLog(offStart, offEnd);
+                break;
+            case &quot;dddr_calllog&quot;:
+                processdddrCallLog(offStart, offEnd);
+                break;
+            case &quot;eee_calllog&quot;:
+                processeeeCallLog(offStart, offEnd);
+                break;
+            default:
+                log.warn(&quot;Unknown call log&quot;);
+                return;
+        }
+    }
+}
+</code></pre>
+</li>
+<li>设置开启时间。</li>
+</ol>
+<h3 id="后续流程">后续流程：</h3>
+<ol>
+<li>可以发现我们只是实现根据数据范围进行批量投放，可能会存在下游任务重复消费的问题，需要与下游进行拉通，让他们加上一个<strong>幂等</strong>逻辑，<strong>防止消息重复消费</strong>。</li>
+</ol>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li>
+<ul>
+<li><a href="#%E9%9C%80%E6%B1%82%E6%8F%8F%E8%BF%B0">需求描述</a></li>
+<li><a href="#%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88">解决方案</a>
+<ul>
+<li><a href="#%E4%BB%8B%E7%BB%8D%E4%B8%80%E4%B8%8Bsaturn">介绍一下<code>Saturn</code>：</a></li>
+<li><a href="#%E5%85%B7%E4%BD%93%E4%BD%BF%E7%94%A8">具体使用：</a></li>
+<li><a href="#%E5%90%8E%E7%BB%AD%E6%B5%81%E7%A8%8B">后续流程：</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://asynchronemind.github.io/post/spring-zi-dong-zhu-ru-wei-null-de-wen-ti-pai-cha/">
+              <h3 class="post-title">
+                Spring 自动注入为 null 的问题排查
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  <a href="https://github.com/AsynchroneMind">Asynn</a> 
+  <a class="rss" href="https://asynchronemind.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

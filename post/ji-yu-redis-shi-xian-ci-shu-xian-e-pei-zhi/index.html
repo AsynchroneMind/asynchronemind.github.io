@@ -1,0 +1,257 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>基于 Redis 实现次数限额配置 | Asynn</title>
+<link rel="shortcut icon" href="https://asynchronemind.github.io/favicon.ico?v=1722239062648">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://asynchronemind.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="基于 Redis 实现次数限额配置 | Asynn - Atom Feed" href="https://asynchronemind.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="需求描述
+需要新增一个功能：外呼次数达到上限停止外呼。
+解决方案
+
+原来的流程图：
+
+现在的流程图：
+
+
+详细流程
+
+存储结构选择：
+
+
+Hash：存储结构设为&lt;不同任务类型前缀，&lt;客户手机号，次数&gt;&gt;。
+键值对：存..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://asynchronemind.github.io">
+  <img class="avatar" src="https://asynchronemind.github.io/images/avatar.png?v=1722239062648" alt="">
+  </a>
+  <h1 class="site-title">
+    Asynn
+  </h1>
+  <p class="site-description">
+    习惯无常才会庆幸。
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/" class="menu">
+          首页
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              基于 Redis 实现次数限额配置
+            </h2>
+            <div class="post-info">
+              <span>
+                2024-07-20
+              </span>
+              <span>
+                3 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <h2 id="需求描述">需求描述</h2>
+<p>需要新增一个功能：外呼次数达到上限停止外呼。</p>
+<h2 id="解决方案">解决方案</h2>
+<ul>
+<li>原来的流程图：<br>
+<img src="https://asynchronemind.github.io/post-images/1721469538795.png" alt="" loading="lazy"></li>
+<li>现在的流程图：<br>
+<img src="https://asynchronemind.github.io/post-images/1721469607830.png" alt="" loading="lazy"></li>
+</ul>
+<h3 id="详细流程">详细流程</h3>
+<ol>
+<li>存储结构选择：</li>
+</ol>
+<ul>
+<li>Hash：存储结构设为&lt;不同任务类型前缀，&lt;客户手机号，次数&gt;&gt;。</li>
+<li><strong>键值对</strong>：存储结构设为&lt;不同任务类型前缀_客户手机号，次数&gt;。<br>
+因为公司已存在<code>Redis</code>对应工具类，其中并没有对<code>Hash</code>数据结构的键设置过期时间的实现，所以选用<strong>键值对</strong>作为最终实现方案存储结构。</li>
+</ul>
+<ol start="2">
+<li>
+<p>初版方案：</p>
+<ul>
+<li>实现过程在上面流程图中已经说明清楚，记录呼叫次数理所当然选用<code>increment</code>操作实现，并设置过期时间为当天剩余时间。因为要在多个地方使用，所以抽象出一个方法来：<pre><code class="language-java">@Component
+public class HhtRedisUtil extends RedisUtil {
+    public void setOrIncr(String key) {
+        if(!keyExists(key)) {
+            Calendar now = Calendar.getInstance();
+            Calendar endOfDay = (Calendar) now.clone();
+            endOfDay.set(Calendar.HOUR_OF_DAY, 23);
+            endOfDay.set(Calendar.MINUTE, 59);
+            endOfDay.set(Calendar.SECOND, 59);
+            endOfDay.set(Calendar.MILLISECOND, 999);
+            long expireTime = endOfDay.getTimeInMillis() - now.getTimeInMillis();
+            expireTime = Math.max(1, expireTime / 1000L);
+            set(key, &quot;1&quot;, expireTime);
+        } else {
+            incr(key, 1);
+        }
+    }
+}
+</code></pre>
+</li>
+<li>具体存储过程：<pre><code class="language-java">if(!StrUtils.isNil(calloutConfFeignService.getSysParam(prefix, true).getObj())) { // 生产必不可少的开关 0.0
+    String redisKey = prefix + &quot;_&quot; + EncryptAndDecryptUtil.encrypt(OperType.ENCRYPT, EDataType.PHONE_NO,record.getCalledNum());
+    hhtRedisUtil.setOrIncr(redisKey);
+}
+</code></pre>
+</li>
+</ul>
+</li>
+<li>
+<p>面临的问题：<br>
+因为之前所实现的<code>RedisUtil</code>中注入的为：</p>
+<pre><code class="language-java">public class RedisUtil {
+ @Autowired
+ private RedisTemplate&lt;String, String&gt; redisTemplate;
+
+</code></pre>
+<p>导致键值对初始化时设置的值为<code>String</code>类型的&quot;1&quot;，致使后续的<code>incr(key, 1)</code>因为类型不匹配而<strong>报错</strong>。</p>
+</li>
+<li>
+<p>最终解决思路：</p>
+<ul>
+<li>首先工具类是肯定不能改的，因为别的地方已经使用过很多次了，改了不知道会出啥问题，所以<strong>改泛型</strong>的思路被否决。</li>
+<li>然后了解到<code>Redis</code>的<code>increment</code>在<strong>键不存在时会新建</strong>，并返回值为1。于是改为：<pre><code class="language-java">public void setOrIncr(String key) {
+    long pnt = incr(key, 1);
+    if(pnt == 1L) {
+        Calendar now = Calendar.getInstance();
+        Calendar endOfDay = (Calendar) now.clone();
+        endOfDay.set(Calendar.HOUR_OF_DAY, 23);
+        endOfDay.set(Calendar.MINUTE, 59);
+        endOfDay.set(Calendar.SECOND, 59);
+        endOfDay.set(Calendar.MILLISECOND, 999);
+        long expireTime = endOfDay.getTimeInMillis() - now.getTimeInMillis();
+        expireTime = Math.max(1, expireTime  / 1000L);
+        setExpire(key, expireTime);
+        }
+    }
+}
+</code></pre>
+于是问题解决。</li>
+</ul>
+</li>
+</ol>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li>
+<ul>
+<li><a href="#%E9%9C%80%E6%B1%82%E6%8F%8F%E8%BF%B0">需求描述</a></li>
+<li><a href="#%E8%A7%A3%E5%86%B3%E6%96%B9%E6%A1%88">解决方案</a>
+<ul>
+<li><a href="#%E8%AF%A6%E7%BB%86%E6%B5%81%E7%A8%8B">详细流程</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://asynchronemind.github.io/post/ji-yu-ding-shi-ren-wu-shi-xian-kafka-xiao-xi-duo-ci-tou-fang/">
+              <h3 class="post-title">
+                基于定时任务实现 Kafka 消息多次投放
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  <a href="https://github.com/AsynchroneMind">Asynn</a> 
+  <a class="rss" href="https://asynchronemind.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>
